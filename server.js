@@ -4,47 +4,48 @@ const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, 'data', 'tasks.json');
 
-// ─── Middleware ───────────────────────────────────────────────────────────────
+// ─── Detect Vercel (serverless) environment ───────────────────────
+const IS_VERCEL = !!process.env.VERCEL;
+
+// ─── In-memory store (used on Vercel) ────────────────────────────
+let memoryStore = [];
+
+// ─── Middleware ───────────────────────────────────────────────────
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-function ensureDataFile() {
+// ─── Storage Helpers ──────────────────────────────────────────────
+function readTasks() {
+  if (IS_VERCEL) return [...memoryStore];
   const dir = path.dirname(DATA_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, JSON.stringify([], null, 2));
-}
-
-function readTasks() {
-  ensureDataFile();
-  const raw = fs.readFileSync(DATA_FILE, 'utf-8');
-  return JSON.parse(raw);
+  return JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
 }
 
 function writeTasks(tasks) {
-  ensureDataFile();
+  if (IS_VERCEL) { memoryStore = tasks; return; }
+  const dir = path.dirname(DATA_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(DATA_FILE, JSON.stringify(tasks, null, 2));
 }
 
-// ─── Routes ──────────────────────────────────────────────────────────────────
+// ─── Routes ──────────────────────────────────────────────────────
 
-// GET all tasks (exclude hard-deleted; include/exclude soft-deleted via query)
+// GET all tasks
 app.get('/api/tasks', (req, res) => {
   try {
-    const { archived } = req.query; // ?archived=true to see soft-deleted
+    const { archived } = req.query;
     let tasks = readTasks().filter(t => !t.hardDeleted);
     if (archived === 'true') {
-      // return only archived (soft-deleted)
       tasks = tasks.filter(t => t.deleted);
     } else {
-      // return only active tasks
       tasks = tasks.filter(t => !t.deleted);
     }
-    // Sort: high → medium → low, then by dueDate asc
     const priorityOrder = { high: 0, medium: 1, low: 2 };
     tasks.sort((a, b) => {
       const pd = (priorityOrder[a.priority] ?? 3) - (priorityOrder[b.priority] ?? 3);
@@ -60,7 +61,7 @@ app.get('/api/tasks', (req, res) => {
   }
 });
 
-// GET single task by id
+// GET single task
 app.get('/api/tasks/:id', (req, res) => {
   try {
     const tasks = readTasks();
@@ -76,9 +77,8 @@ app.get('/api/tasks/:id', (req, res) => {
 app.post('/api/tasks', (req, res) => {
   try {
     const { title, description, priority, dueDate, category } = req.body;
-    if (!title || title.trim() === '') {
+    if (!title || title.trim() === '')
       return res.status(400).json({ success: false, message: 'Title is required' });
-    }
     const tasks = readTasks();
     const newTask = {
       id: uuidv4(),
@@ -107,10 +107,8 @@ app.put('/api/tasks/:id', (req, res) => {
     const tasks = readTasks();
     const idx = tasks.findIndex(t => t.id === req.params.id && !t.hardDeleted);
     if (idx === -1) return res.status(404).json({ success: false, message: 'Task not found' });
-
     const { title, description, priority, dueDate, category, completed } = req.body;
     const task = tasks[idx];
-
     if (title !== undefined) task.title = title.trim();
     if (description !== undefined) task.description = description.trim();
     if (priority !== undefined && ['high', 'medium', 'low'].includes(priority)) task.priority = priority;
@@ -118,7 +116,6 @@ app.put('/api/tasks/:id', (req, res) => {
     if (category !== undefined) task.category = category.trim();
     if (completed !== undefined) task.completed = Boolean(completed);
     task.updatedAt = new Date().toISOString();
-
     writeTasks(tasks);
     res.json({ success: true, message: 'Task updated successfully', data: task });
   } catch (err) {
@@ -173,7 +170,7 @@ app.patch('/api/tasks/:id/restore', (req, res) => {
   }
 });
 
-// DELETE hard delete (permanent)
+// DELETE hard delete
 app.delete('/api/tasks/:id/hard', (req, res) => {
   try {
     const tasks = readTasks();
@@ -212,13 +209,17 @@ app.get('/api/stats', (req, res) => {
   }
 });
 
-// Serve frontend for all other routes
+// Serve frontend
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// ─── Start server ─────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`\n✅  ToDo List App running at: http://localhost:${PORT}`);
-  console.log(`📁  Data file: ${DATA_FILE}\n`);
-});
+// ─── Start server (skipped on Vercel — it handles this) ──────────
+if (!IS_VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`\n✅  ToDo List App running at: http://localhost:${PORT}`);
+    console.log(`📁  Data file: ${DATA_FILE}\n`);
+  });
+}
+
+module.exports = app;
